@@ -1,8 +1,7 @@
-
 [project]
 name = "copa-x"
-version = "1.1.0"
-description = "COPA X universal Android downloader"
+version = "2.0.0"
+description = "COPA X Universal Android video downloader"
 requires-python = ">=3.10,<3.14"
 dependencies = [
   "flet>=0.86.0,<1.0.0",
@@ -14,6 +13,7 @@ dependencies = [
 product = "COPA X"
 org = "com.copax"
 description = "محمّل فيديوهات مع الترجمة"
+assets = ["assets"]
 
 [tool.flet.android]
 split_per_abi = false
