@@ -2,18 +2,19 @@
 name = "copa-x"
 version = "2.0.0"
 description = "COPA X Universal Android video downloader"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.12,<3.13"
+
 dependencies = [
-  "flet>=0.86.0,<1.0.0",
-  "yt-dlp[default]",
-  "yt-dlp-ejs",
+    "flet[all]>=0.86.0,<1.0.0",
+    "yt-dlp[default]",
+    "yt-dlp-ejs",
 ]
 
 [tool.flet]
 product = "COPA X"
 org = "com.copax"
-description = "محمّل فيديوهات مع الترجمة"
-assets = ["assets"]
+description = "محمّل فيديوهات عالمي مع الترجمة وFFmpeg وQuickJS"
+assets = "assets"
 
 [tool.flet.android]
 split_per_abi = false
