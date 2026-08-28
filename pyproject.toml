@@ -1,0 +1,24 @@
+
+[project]
+name = "copa-x"
+version = "1.1.0"
+description = "COPA X universal Android downloader"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "flet>=0.86.0,<1.0.0",
+  "yt-dlp[default]",
+  "yt-dlp-ejs",
+]
+
+[tool.flet]
+product = "COPA X"
+org = "com.copax"
+description = "محمّل فيديوهات مع الترجمة"
+
+[tool.flet.android]
+split_per_abi = false
+target_sdk_version = 35
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
