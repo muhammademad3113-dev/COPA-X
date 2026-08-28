@@ -1,15 +1,17 @@
 import os
 import platform
-import re
 import shutil
+import stat
 import threading
 from pathlib import Path
 
 import flet as ft
 import yt_dlp
 
+
 APP_NAME = "COPA X"
-DEFAULT_DIR = "/storage/emulated/0/Download/COPA X/"
+
+DEFAULT_DIR = "/storage/emulated/0/COPA X/"
 
 QUALITY = {
     "أعلى جودة": "bv*+ba/b",
@@ -18,240 +20,624 @@ QUALITY = {
     "360p": "bv*[height<=360]+ba/b[height<=360]/b",
 }
 
+
 def get_abi():
-    m = platform.machine().lower()
-    if "aarch64" in m or "arm64" in m:
+    machine = platform.machine().lower()
+
+    if "aarch64" in machine or "arm64" in machine:
         return "arm64-v8a"
-    if "armv7" in m or m == "arm":
+
+    if "armv7" in machine or machine == "arm":
         return "armeabi-v7a"
-    if "x86_64" in m or "amd64" in m:
+
+    if "x86_64" in machine or "amd64" in machine:
         return "x86_64"
-    if m in ("i686", "x86"):
-        return "x86"
-    return m
 
-def bundled_binary(name):
-    """Copy an Android binary from the read-only Flet bundle to writable app storage."""
+    return machine
+
+
+def get_assets_dir():
+    """
+    Flet 0.86+:
+    ملفات assets المضمنة داخل التطبيق تكون للقراءة فقط.
+    نقرأ منها ثم ننسخ executable إلى مجلد التطبيق القابل للكتابة.
+    """
+
+    env_dir = os.environ.get("FLET_ASSETS_DIR")
+
+    if env_dir:
+        return Path(env_dir)
+
+    # للتشغيل أثناء التطوير
+    return Path(__file__).resolve().parent / "assets"
+
+
+def runtime_file(name):
+    """
+    العثور على FFmpeg / QuickJS المناسب لمعمارية الجهاز.
+
+    البحث:
+    1) assets المضمنة داخل APK.
+    2) assets المحلية أثناء التطوير.
+
+    ثم نسخ الملف إلى مجلد writable وإعطاؤه صلاحية التنفيذ.
+    """
+
     abi = get_abi()
-    storage = Path(os.environ.get("FLET_APP_STORAGE_DATA", Path.cwd()))
-    dst = storage / "copa_x_bin" / abi / name
-    if dst.exists():
-        return str(dst)
 
-    src = Path(__file__).resolve().parent / "assets" / "bin" / abi / name
-    if not src.exists():
+    assets_dir = get_assets_dir()
+
+    source = assets_dir / "bin" / abi / name
+
+    if not source.exists():
+        # fallback للتطوير
+        fallback = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "bin"
+            / abi
+            / name
+        )
+
+        if fallback.exists():
+            source = fallback
+        else:
+            return None
+
+    storage = Path(
+        os.environ.get(
+            "FLET_APP_STORAGE_DATA",
+            Path.cwd(),
+        )
+    )
+
+    destination = (
+        storage
+        / "copa_x_bin"
+        / abi
+        / name
+    )
+
+    try:
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        # إذا الملف غير موجود أو تغير الحجم، انسخه من جديد.
+        if (
+            not destination.exists()
+            or destination.stat().st_size != source.stat().st_size
+        ):
+            shutil.copy2(
+                source,
+                destination,
+            )
+
+        destination.chmod(
+            destination.stat().st_mode
+            | stat.S_IXUSR
+            | stat.S_IXGRP
+            | stat.S_IXOTH
+        )
+
+        return str(destination)
+
+    except Exception:
         return None
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    try:
-        dst.chmod(dst.stat().st_mode | 0o111)
-    except OSError:
-        pass
-    return str(dst)
 
-def safe_component(value, limit=80):
-    value = value or "video"
-    value = re.sub(r'[<>:"/\\\\|?*\x00-\x1f]', "_", value)
-    value = re.sub(r"\s+", " ", value).strip().rstrip(".")
-    return value[:limit] or "video"
+class Log:
+    def __init__(self, callback):
+        self.callback = callback
 
-class YDLLogger:
-    def __init__(self, fn):
-        self.fn = fn
-    def debug(self, msg):
-        if not msg.startswith("[debug]"):
-            self.fn(msg + "\n")
-    def info(self, msg):
-        self.fn(msg + "\n")
-    def warning(self, msg):
-        self.fn("[WARN] " + msg + "\n")
-    def error(self, msg):
-        self.fn("[ERROR] " + msg + "\n")
+    def debug(self, message):
+        if not str(message).startswith("[debug]"):
+            self.callback(str(message) + "\n")
+
+    def info(self, message):
+        self.callback(str(message) + "\n")
+
+    def warning(self, message):
+        self.callback("[WARN] " + str(message) + "\n")
+
+    def error(self, message):
+        self.callback("[ERROR] " + str(message) + "\n")
+
 
 def main(page: ft.Page):
     page.title = APP_NAME
     page.rtl = True
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
-    page.theme = ft.Theme(color_scheme_seed="#673AB7")
+
+    # ---------------------------------------------------------
+    # عناصر التحميل
+    # ---------------------------------------------------------
 
     url = ft.TextField(
         label="رابط الفيديو / Playlist",
-        hint_text="YouTube، TikTok، Instagram...",
-        filled=True, border_radius=12,
+        hint_text="YouTube، TikTok، Instagram وغيرها...",
+        filled=True,
+        border_radius=12,
         text_align=ft.TextAlign.RIGHT,
+        autofocus=False,
     )
+
     quality = ft.Dropdown(
         label="الجودة",
-        options=[ft.dropdown.Option(x) for x in QUALITY],
-        value="أعلى جودة", filled=True, border_radius=12,
+        options=[
+            ft.dropdown.Option(name)
+            for name in QUALITY.keys()
+        ],
+        value="أعلى جودة",
+        filled=True,
+        border_radius=12,
     )
-    langs = ft.TextField(
-        label="لغات الترجمة (مثال: ar,en)",
-        value="ar,en", filled=True, border_radius=12,
+
+    subtitle_languages = ft.TextField(
+        label="لغات الترجمة",
+        value="ar,en",
+        hint_text="مثال: ar,en,fr",
+        filled=True,
+        border_radius=12,
         text_align=ft.TextAlign.RIGHT,
     )
-    auto_sub = ft.Switch(label="تحميل الترجمة الآلية", value=True)
-    embed_sub = ft.Switch(label="دمج الترجمة داخل الفيديو", value=False)
-    playlist_dirs = ft.Switch(
-        label="مجلد منفصل لكل فيديو في Playlist", value=True
+
+    automatic_subtitles = ft.Switch(
+        label="تحميل الترجمة الآلية",
+        value=True,
     )
-    path = ft.TextField(
+
+    embed_subtitles = ft.Switch(
+        label="دمج الترجمة داخل الفيديو",
+        value=False,
+    )
+
+    playlist_folders = ft.Switch(
+        label="مجلد منفصل لكل فيديو في Playlist",
+        value=True,
+    )
+
+    save_path = ft.TextField(
         label="مجلد الحفظ",
         value=DEFAULT_DIR,
-        filled=True, border_radius=12,
+        filled=True,
+        border_radius=12,
         text_align=ft.TextAlign.RIGHT,
     )
 
-    log = ft.Text("", selectable=True, size=11, font_family="monospace")
-    log_box = ft.Container(
-        content=ft.Column([log], scroll=ft.ScrollMode.AUTO),
-        height=260, bgcolor="#111111", padding=10, border_radius=12,
+    log_text = ft.Text(
+        "",
+        selectable=True,
+        size=11,
+        font_family="monospace",
     )
-    status = ft.Text("", weight=ft.FontWeight.BOLD, size=12)
-    progress = ft.ProgressRing(visible=False, width=22, height=22)
 
-    def write(text):
-        log.value += text
+    log_box = ft.Container(
+        content=ft.Column(
+            [log_text],
+            scroll=ft.ScrollMode.AUTO,
+        ),
+        height=280,
+        bgcolor="#111111",
+        padding=10,
+        border_radius=12,
+    )
+
+    status = ft.Text(
+        "",
+        weight=ft.FontWeight.BOLD,
+        size=13,
+    )
+
+    progress = ft.ProgressRing(
+        visible=False,
+        width=24,
+        height=24,
+    )
+
+    # ---------------------------------------------------------
+    # وظائف الواجهة
+    # ---------------------------------------------------------
+
+    def update_page():
         try:
             page.update()
         except Exception:
             pass
 
-    def hook(d):
-        if d.get("status") == "downloading":
-            status.value = (
-                f"جاري التحميل: {d.get('_percent_str','')} | "
-                f"{d.get('_speed_str','')} | ETA {d.get('_eta_str','')}"
+    def write_log(message):
+        log_text.value += str(message)
+
+        # لا نترك السجل يكبر بلا حدود.
+        if len(log_text.value) > 30000:
+            log_text.value = log_text.value[-30000:]
+
+        update_page()
+
+    def progress_hook(data):
+        state = data.get("status")
+
+        if state == "downloading":
+
+            percent = data.get(
+                "_percent_str",
+                "",
             )
-        elif d.get("status") == "finished":
-            status.value = "تم التنزيل، جارٍ المعالجة..."
+
+            speed = data.get(
+                "_speed_str",
+                "",
+            )
+
+            eta = data.get(
+                "_eta_str",
+                "",
+            )
+
+            filename = data.get(
+                "filename",
+                "",
+            )
+
+            if filename:
+                filename = os.path.basename(
+                    str(filename)
+                )
+
+            status.value = (
+                f"جاري التحميل: {percent} | "
+                f"{speed} | ETA {eta}\n"
+                f"{filename}"
+            )
+
+            update_page()
+
+        elif state == "finished":
+
+            status.value = (
+                "تم تنزيل الملف، جارٍ المعالجة..."
+            )
+
+            update_page()
+
+    # ---------------------------------------------------------
+    # العامل الرئيسي للتحميل
+    # ---------------------------------------------------------
+
+    def worker():
         try:
-            page.update()
-        except Exception:
-            pass
+            target_url = (
+                url.value or ""
+            ).strip()
 
-    def worker(target_url, fmt, language_text, auto_value,
-               save_dir, playlist_value, embed_value):
-        try:
-            os.makedirs(save_dir, exist_ok=True)
+            if not target_url:
+                raise ValueError(
+                    "لم يتم إدخال رابط."
+                )
 
-            ffmpeg = bundled_binary("ffmpeg")
-            qjs = bundled_binary("qjs")
+            save_dir = (
+                save_path.value or DEFAULT_DIR
+            ).strip()
 
-            write(f"[INFO] ABI: {get_abi()}\n")
-            write(f"[INFO] yt-dlp: {yt_dlp.version.__version__}\n")
-            write(f"[INFO] FFmpeg: {ffmpeg or 'غير موجود'}\n")
-            write(f"[INFO] QuickJS: {qjs or 'غير موجود'}\n")
+            if not save_dir:
+                save_dir = DEFAULT_DIR
 
-            if playlist_value:
-                template = os.path.join(
+            # -------------------------------------------------
+            # تجهيز مجلد الحفظ
+            # -------------------------------------------------
+
+            try:
+                os.makedirs(
+                    save_dir,
+                    exist_ok=True,
+                )
+            except Exception as exc:
+                write_log(
+                    "[WARN] تعذر إنشاء مجلد الحفظ المحدد.\n"
+                    f"[WARN] {exc}\n"
+                    "[WARN] سيتم استخدام مجلد التطبيق مؤقتًا.\n"
+                )
+
+                fallback_dir = Path(
+                    os.environ.get(
+                        "FLET_APP_STORAGE_DATA",
+                        Path.cwd(),
+                    )
+                ) / "downloads"
+
+                fallback_dir.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                save_dir = str(
+                    fallback_dir
+                )
+
+                write_log(
+                    f"[INFO] مجلد الحفظ البديل: {save_dir}\n"
+                )
+
+            # -------------------------------------------------
+            # الحصول على FFmpeg وQuickJS
+            # -------------------------------------------------
+
+            ffmpeg = runtime_file(
+                "ffmpeg"
+            )
+
+            qjs = runtime_file(
+                "qjs"
+            )
+
+            write_log(
+                f"[INFO] ABI: {get_abi()}\n"
+            )
+
+            write_log(
+                f"[INFO] yt-dlp: "
+                f"{yt_dlp.version.__version__}\n"
+            )
+
+            write_log(
+                "[INFO] FFmpeg: "
+                f"{ffmpeg or 'غير موجود'}\n"
+            )
+
+            write_log(
+                "[INFO] QuickJS: "
+                f"{qjs or 'غير موجود'}\n"
+            )
+
+            if not ffmpeg:
+                raise RuntimeError(
+                    "FFmpeg غير موجود داخل APK."
+                )
+
+            if not qjs:
+                raise RuntimeError(
+                    "QuickJS غير موجود داخل APK."
+                )
+
+            # -------------------------------------------------
+            # قالب أسماء الملفات
+            # -------------------------------------------------
+
+            if playlist_folders.value:
+                output_template = os.path.join(
                     save_dir,
                     "video %(playlist_index)03d",
-                    "%(title).80s [%(id)s].%(ext)s",
+                    "%(title).100s [%(id)s].%(ext)s",
                 )
             else:
-                template = os.path.join(
+                output_template = os.path.join(
                     save_dir,
-                    "%(title).80s [%(id)s].%(ext)s",
+                    "%(title).100s [%(id)s].%(ext)s",
                 )
 
-            opts = {
-                "format": fmt,
-                "outtmpl": template,
+            # -------------------------------------------------
+            # إعدادات yt-dlp
+            # -------------------------------------------------
+
+            languages = [
+                item.strip()
+                for item in (
+                    subtitle_languages.value or ""
+                ).split(",")
+                if item.strip()
+            ]
+
+            options = {
+                "format": QUALITY.get(
+                    quality.value,
+                    QUALITY["أعلى جودة"],
+                ),
+
+                "outtmpl": output_template,
+
                 "merge_output_format": "mp4",
+
+                # محاولات إضافية
                 "retries": 10,
                 "fragment_retries": 10,
                 "file_access_retries": 5,
-                "extractor_retries": 3,
+                "extractor_retries": 5,
+
+                # استكمال التحميل
                 "continuedl": True,
                 "overwrites": False,
-                "writesubtitles": True,
-                "writeautomaticsub": auto_value,
-                "subtitleslangs": [
-                    x.strip() for x in language_text.split(",") if x.strip()
+
+                # أسماء آمنة
+                "restrictfilenames": True,
+                "windowsfilenames": True,
+
+                # Playlist
+                "ignoreerrors": False,
+
+                # الترجمة
+                "writesubtitles": bool(
+                    languages
+                ),
+
+                "writeautomaticsub": bool(
+                    automatic_subtitles.value
+                    and languages
+                ),
+
+                "subtitleslangs": languages,
+
+                "subtitlesformat": "srt/best",
+
+                # Logging
+                "progress_hooks": [
+                    progress_hook
                 ],
-                "subtitlesformat": "srt",
-                "progress_hooks": [hook],
-                "logger": YDLLogger(write),
-                "quiet": False,
-                "no_warnings": False,
+
+                "logger": Log(
+                    write_log
+                ),
+
+                # EJS / QuickJS
+                "js_runtimes": (
+                    {
+                        "quickjs": qjs
+                    }
+                    if qjs
+                    else {}
+                ),
+
+                # السماح لـ yt-dlp باستخدام EJS
+                "remote_components": (
+                    "ejs:github"
+                ),
             }
 
-            if ffmpeg:
-                opts["ffmpeg_location"] = ffmpeg
+            # -------------------------------------------------
+            # FFmpeg
+            # -------------------------------------------------
 
-            if qjs:
-                opts["js_runtimes"] = {"quickjs": qjs}
-                opts["remote_components"] = {"ejs": ["github"]}
+            options[
+                "ffmpeg_location"
+            ] = ffmpeg
 
-            if embed_value and ffmpeg:
-                opts["embedsubs"] = True
+            # -------------------------------------------------
+            # دمج الترجمة داخل الفيديو
+            # -------------------------------------------------
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                rc = ydl.download([target_url])
+            if (
+                embed_subtitles.value
+                and ffmpeg
+                and languages
+            ):
+                options[
+                    "embedsubs"
+                ] = True
 
-            if rc not in (0, None):
-                raise RuntimeError(f"yt-dlp returned {rc}")
+            # -------------------------------------------------
+            # تشغيل yt-dlp
+            # -------------------------------------------------
 
-            write("\n[DONE] تم الانتهاء بنجاح ✅\n")
-            status.value = "تم الانتهاء بنجاح ✅"
+            write_log(
+                "\n[INFO] بدء yt-dlp...\n"
+            )
+
+            with yt_dlp.YoutubeDL(
+                options
+            ) as downloader:
+
+                result = downloader.download(
+                    [target_url]
+                )
+
+            if result not in (
+                0,
+                None,
+            ):
+                raise RuntimeError(
+                    f"yt-dlp returned {result}"
+                )
+
+            write_log(
+                "\n[DONE] تم الانتهاء بنجاح ✅\n"
+            )
+
+            status.value = (
+                "تم الانتهاء بنجاح ✅"
+            )
 
         except Exception as exc:
-            msg = str(exc)
-            write("\n[ERROR] " + msg + "\n")
-            low = msg.lower()
-            if "403" in low:
-                write(
-                    "[HELP] 403: المنصة رفضت الطلب. "
-                    "التحديث وJavaScript يساعدان، لكن بعض المواقع تتطلب جلسة دخول/كوكيز.\n"
+
+            message = str(exc)
+
+            write_log(
+                "\n[ERROR] "
+                + message
+                + "\n"
+            )
+
+            lower = message.lower()
+
+            if "403" in lower:
+                write_log(
+                    "[HELP] المنصة رفضت الطلب (403). "
+                    "هذا ليس خطأ FFmpeg.\n"
+                    "[HELP] تأكد من تحديث yt-dlp وEJS.\n"
                 )
-            if "javascript" in low or "js runtime" in low or "challenge" in low:
-                write(
-                    "[HELP] JavaScript: تأكد أن QuickJS موجود داخل APK "
-                    "وأن EJS متاح.\n"
+
+            if (
+                "javascript" in lower
+                or "js runtime" in lower
+                or "ejs" in lower
+            ):
+                write_log(
+                    "[HELP] مشكلة JavaScript/EJS. "
+                    "تأكد من وجود QuickJS داخل APK.\n"
                 )
-            status.value = "حدث خطأ ❌"
+
+            if "ffmpeg" in lower:
+                write_log(
+                    "[HELP] مشكلة FFmpeg. "
+                    "تأكد من أن الـWorkflow نجح في تضمينه.\n"
+                )
+
+            status.value = (
+                "حدث خطأ ❌"
+            )
+
         finally:
+
             progress.visible = False
             download_button.disabled = False
-            try:
-                page.update()
-            except Exception:
-                pass
+
+            update_page()
+
+    # ---------------------------------------------------------
+    # بدء التحميل
+    # ---------------------------------------------------------
 
     def start_download(_):
-        target = (url.value or "").strip()
+        target = (
+            url.value or ""
+        ).strip()
+
         if not target:
-            url.error_text = "أدخل الرابط"
-            page.update()
+            url.error_text = (
+                "أدخل رابط الفيديو أو Playlist"
+            )
+
+            update_page()
             return
 
         url.error_text = None
-        log.value = ""
-        status.value = "بدء التحميل..."
+
+        log_text.value = ""
+
+        status.value = (
+            "بدء التحميل..."
+        )
+
         progress.visible = True
         download_button.disabled = True
-        page.update()
+
+        update_page()
 
         threading.Thread(
             target=worker,
-            args=(
-                target,
-                QUALITY.get(quality.value, QUALITY["أعلى جودة"]),
-                langs.value or "ar,en",
-                bool(auto_sub.value),
-                (path.value or DEFAULT_DIR).strip(),
-                bool(playlist_dirs.value),
-                bool(embed_sub.value),
-            ),
             daemon=True,
         ).start()
 
     download_button = ft.ElevatedButton(
-        "⬇ ابدأ التحميل", width=400, height=48, on_click=start_download
+        "⬇ ابدأ التحميل",
+        width=400,
+        height=50,
+        on_click=start_download,
     )
+
+    # ---------------------------------------------------------
+    # صفحة التحميل
+    # ---------------------------------------------------------
 
     download_view = ft.Container(
         padding=12,
@@ -262,91 +648,186 @@ def main(page: ft.Page):
                         padding=16,
                         content=ft.Column(
                             [
-                                url, quality, langs, auto_sub,
-                                embed_sub, playlist_dirs, path
+                                url,
+                                quality,
+                                subtitle_languages,
+                                automatic_subtitles,
+                                embed_subtitles,
+                                playlist_folders,
+                                save_path,
                             ],
                             spacing=12,
                         ),
                     )
                 ),
+
                 ft.Row(
-                    [download_button, progress],
-                    alignment=ft.MainAxisAlignment.CENTER
+                    [
+                        download_button,
+                        progress,
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
                 ),
+
                 status,
-                ft.Text("السجل", weight=ft.FontWeight.BOLD),
+
+                ft.Text(
+                    "السجل",
+                    weight=ft.FontWeight.BOLD,
+                ),
+
                 log_box,
             ],
             spacing=12,
             scroll=ft.ScrollMode.AUTO,
         ),
+        expand=True,
     )
 
-    dark = ft.Switch(
+    # ---------------------------------------------------------
+    # الإعدادات
+    # ---------------------------------------------------------
+
+    dark_mode = ft.Switch(
         label="الوضع الليلي",
         value=True,
-        on_change=lambda e: (
-            setattr(
-                page,
-                "theme_mode",
-                ft.ThemeMode.DARK if e.control.value
-                else ft.ThemeMode.LIGHT,
-            ),
-            page.update(),
-        ),
     )
+
+    def change_theme(e):
+        page.theme_mode = (
+            ft.ThemeMode.DARK
+            if e.control.value
+            else ft.ThemeMode.LIGHT
+        )
+
+        update_page()
+
+    dark_mode.on_change = change_theme
 
     settings_view = ft.Container(
         padding=16,
         content=ft.Column(
             [
-                ft.Text("COPA X", size=24, weight=ft.FontWeight.BOLD),
-                dark,
                 ft.Text(
-                    "Universal: arm64-v8a + armeabi-v7a + x86_64 + x86",
-                    size=12,
+                    "COPA X",
+                    size=26,
+                    weight=ft.FontWeight.BOLD,
                 ),
+
                 ft.Text(
-                    "FFmpeg وQuickJS يتم تجهيزهما داخل GitHub Actions "
-                    "ثم تضمينهما في APK.",
-                    size=12,
+                    "Universal Android Downloader",
+                    size=14,
                 ),
+
+                dark_mode,
+
+                ft.Divider(),
+
                 ft.Text(
-                    "أسماء الملفات تُقص لتقليل مشاكل طول المسار.",
-                    size=12,
+                    "المعماريات المدعومة:",
+                    weight=ft.FontWeight.BOLD,
                 ),
+
                 ft.Text(
-                    "403 لا يمكن ضمان منعه؛ قد يكون من حماية المنصة "
-                    "أو الحاجة إلى جلسة دخول.",
+                    "arm64-v8a\n"
+                    "armeabi-v7a\n"
+                    "x86_64",
+                    size=13,
+                ),
+
+                ft.Divider(),
+
+                ft.Text(
+                    "FFmpeg: مضمّن تلقائيًا داخل APK",
+                    size=13,
+                ),
+
+                ft.Text(
+                    "QuickJS: مضمّن تلقائيًا داخل APK",
+                    size=13,
+                ),
+
+                ft.Text(
+                    "yt-dlp + EJS: يتم تحديثهما مع البناء",
+                    size=13,
+                ),
+
+                ft.Divider(),
+
+                ft.Text(
+                    "ملاحظة:",
+                    weight=ft.FontWeight.BOLD,
+                ),
+
+                ft.Text(
+                    "إذا رفض Android الكتابة في المسار "
+                    "المحدد، سيستخدم التطبيق مجلدًا "
+                    "داخليًا احتياطيًا بدل توقف التحميل.",
                     size=12,
                 ),
             ],
             spacing=12,
+            scroll=ft.ScrollMode.AUTO,
         ),
+        expand=True,
+    )
+
+    # ---------------------------------------------------------
+    # التنقل
+    # ---------------------------------------------------------
+
+    current_view = ft.Column(
+        [download_view],
+        expand=True,
+    )
+
+    def show_download(_):
+        current_view.controls = [
+            download_view
+        ]
+        current_view.update()
+
+    def show_settings(_):
+        current_view.controls = [
+            settings_view
+        ]
+        current_view.update()
+
+    navigation = ft.Row(
+        [
+            ft.ElevatedButton(
+                "⬇ التحميل",
+                on_click=show_download,
+            ),
+            ft.ElevatedButton(
+                "⚙ الإعدادات",
+                on_click=show_settings,
+            ),
+        ],
+        alignment=ft.MainAxisAlignment.CENTER,
     )
 
     page.add(
-        ft.Tabs(
-            selected_index=0,
-            length=2,
+        ft.Column(
+            [
+                ft.Container(
+                    padding=10,
+                    content=ft.Text(
+                        "COPA X",
+                        size=22,
+                        weight=ft.FontWeight.BOLD,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ),
+
+                navigation,
+
+                current_view,
+            ],
             expand=True,
-            content=ft.Column(
-                expand=True,
-                controls=[
-                    ft.TabBar(
-                        tabs=[
-                            ft.Tab(label="⬇ تحميل"),
-                            ft.Tab(label="⚙ إعدادات"),
-                        ]
-                    ),
-                    ft.TabBarView(
-                        expand=True,
-                        controls=[download_view, settings_view],
-                    ),
-                ],
-            ),
         )
     )
 
+
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)
