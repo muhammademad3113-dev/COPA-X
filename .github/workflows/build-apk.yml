@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
@@ -12,102 +11,79 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-
-  # آخر إصدار FFmpeg Android ثابت استخدمناه
-  FFMPEG_BUILD: "264"
-  FFMPEG_COMMIT: "ee2eb6c"
-  FFMPEG_VERSION: "8.0"
-
-  # QuickJS-NG
-  QUICKJS_VERSION: "v0.15.1"
+  FFMPEG_TAG: "build-264"
+  QUICKJS_TAG: "v0.15.1"
 
 jobs:
-
   build:
-
     name: Build Universal APK
-
     runs-on: ubuntu-latest
 
     steps:
 
-      # ========================================================
+      # =====================================================
       # 1. تحميل المشروع
-      # ========================================================
+      # =====================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
-      # ========================================================
-      # 2. التأكد من مكان المشروع
-      # ========================================================
+      # =====================================================
+      # 2. التأكد من الملفات
+      # =====================================================
 
       - name: Check project
         shell: bash
         run: |
-
           set -e
 
-          echo "======================================"
-          echo "COPA X PROJECT"
-          echo "======================================"
-
+          echo "Project:"
           pwd
-
-          echo
-          echo "Files:"
           ls -la
 
           test -f main.py
           test -f pyproject.toml
 
-          echo
-          echo "Project root OK."
+          echo "Project files OK."
 
-
-      # ========================================================
-      # 3. Python 3.12
-      # ========================================================
+      # =====================================================
+      # 3. Python
+      # =====================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
-
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # =====================================================
+      # 4. أدوات النظام
+      # =====================================================
 
-      # ========================================================
-      # 4. أدوات البناء
-      # ========================================================
-
-      - name: Install build tools
+      - name: Install system tools
         shell: bash
         run: |
-
           set -e
 
           sudo apt-get update
 
           sudo apt-get install -y \
-            wget \
             curl \
+            wget \
             unzip \
             zip \
             git \
+            jq \
             cmake \
             ninja-build \
             build-essential
 
-
-      # ========================================================
-      # 5. تثبيت Python packages
-      # ========================================================
+      # =====================================================
+      # 5. Python packages
+      # =====================================================
 
       - name: Install Python packages
         shell: bash
         run: |
-
           set -e
 
           python -m pip install --upgrade pip
@@ -117,103 +93,125 @@ jobs:
             "yt-dlp[default]" \
             "yt-dlp-ejs"
 
-          echo
           echo "Python:"
           python --version
 
-          echo
           echo "Flet:"
           flet --version
 
-          echo
           echo "yt-dlp:"
           python -c "import yt_dlp; print(yt_dlp.version.__version__)"
 
-
-      # ========================================================
-      # 6. إنشاء assets
-      # ========================================================
+      # =====================================================
+      # 6. إنشاء مجلدات binaries
+      # =====================================================
 
       - name: Prepare assets
         shell: bash
         run: |
-
           set -e
 
           mkdir -p assets/bin/arm64-v8a
           mkdir -p assets/bin/armeabi-v7a
           mkdir -p assets/bin/x86_64
 
-          echo "Assets directories ready."
-
-          find assets -type d -print
-
-
-      # ========================================================
-      # 7. تحميل FFmpeg Android
+      # =====================================================
+      # 7. FFmpeg
       #
-      # Static FFmpeg
-      #
-      # arm64-v8a
-      # armeabi-v7a
-      # x86_64
-      # ========================================================
+      # مهم:
+      # لا نعتمد على اسم ملف ثابت.
+      # نطلب من GitHub API اسم الـasset الحقيقي.
+      # =====================================================
 
       - name: Download FFmpeg Android
         shell: bash
         run: |
-
           set -e
 
-          BASE="https://github.com/rhythmcache/ffmpeg-android/releases/download/build-${FFMPEG_BUILD}"
+          API="https://api.github.com/repos/rhythmcache/ffmpeg-android/releases/tags/${FFMPEG_TAG}"
+
+          echo "Reading FFmpeg release..."
+          echo "$API"
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            "$API" \
+            -o /tmp/ffmpeg-release.json
+
+          echo
+          echo "FFmpeg release:"
+          jq -r '.name' /tmp/ffmpeg-release.json
 
           download_ffmpeg() {
 
             ABI="$1"
 
-            URL="${BASE}/ffmpeg-${FFMPEG_VERSION}-${FFMPEG_COMMIT}-Static-android-${ABI}.zip"
-
             echo
             echo "======================================"
-            echo "FFmpeg: ${ABI}"
+            echo "FFmpeg ${ABI}"
             echo "======================================"
 
-            echo "URL:"
-            echo "$URL"
+            ASSET_URL="$(
+              jq -r \
+              --arg ABI "$ABI" \
+              '
+              .assets[]
+              | select(.name | contains("Static-android-" + $ABI))
+              | .browser_download_url
+              ' \
+              /tmp/ffmpeg-release.json \
+              | head -n 1
+            )"
+
+            if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+              echo "ERROR: Static FFmpeg asset not found for ${ABI}"
+
+              echo
+              echo "Available assets:"
+              jq -r '.assets[].name' /tmp/ffmpeg-release.json
+
+              exit 1
+            fi
+
+            echo "Asset:"
+            echo "$ASSET_URL"
+
+            ZIP="/tmp/ffmpeg-${ABI}.zip"
+            DIR="/tmp/ffmpeg-${ABI}"
 
             curl \
               --fail \
               --location \
               --retry 5 \
               --retry-delay 3 \
-              "$URL" \
-              -o "/tmp/ffmpeg-${ABI}.zip"
+              "$ASSET_URL" \
+              -o "$ZIP"
 
-            mkdir -p "/tmp/ffmpeg-${ABI}"
+            rm -rf "$DIR"
+            mkdir -p "$DIR"
 
             unzip \
               -o \
-              "/tmp/ffmpeg-${ABI}.zip" \
-              -d "/tmp/ffmpeg-${ABI}"
+              "$ZIP" \
+              -d "$DIR"
 
             echo
-            echo "Archive content:"
-            find "/tmp/ffmpeg-${ABI}" \
-              -type f \
-              -maxdepth 8 \
-              -print
+            echo "Archive contents:"
+            find "$DIR" -type f -print
 
-            BIN="$(find "/tmp/ffmpeg-${ABI}" \
-              -type f \
-              -name ffmpeg \
-              | head -n 1)"
+            BIN="$(
+              find "$DIR" \
+                -type f \
+                -name "ffmpeg" \
+                | head -n 1
+            )"
 
             if [ -z "$BIN" ]; then
+              echo "ERROR: ffmpeg executable not found."
 
-              echo
-              echo "ERROR: FFmpeg binary not found."
               exit 1
-
             fi
 
             cp \
@@ -224,7 +222,7 @@ jobs:
               "assets/bin/${ABI}/ffmpeg"
 
             echo
-            echo "Installed:"
+            echo "Installed FFmpeg:"
             ls -lh \
               "assets/bin/${ABI}/ffmpeg"
 
@@ -232,36 +230,21 @@ jobs:
               "assets/bin/${ABI}/ffmpeg"
           }
 
-          download_ffmpeg "arm64-v8a"
-          download_ffmpeg "armeabi-v7a"
-          download_ffmpeg "x86_64"
+          download_ffmpeg arm64-v8a
+          download_ffmpeg armeabi-v7a
+          download_ffmpeg x86_64
 
-
-      # ========================================================
-      # 8. تجهيز Android SDK / NDK
-      #
-      # GitHub runner يحتوي Android SDK.
-      # نختار أحدث NDK مثبت.
-      # ========================================================
+      # =====================================================
+      # 8. Android NDK
+      # =====================================================
 
       - name: Detect Android NDK
         shell: bash
         run: |
-
           set -e
 
           echo "ANDROID_HOME:"
           echo "$ANDROID_HOME"
-
-          echo
-          echo "Installed NDKs:"
-
-          find "$ANDROID_HOME/ndk" \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            2>/dev/null \
-            | sort -V || true
 
           NDK_DIR="$(
             find "$ANDROID_HOME/ndk" \
@@ -273,66 +256,47 @@ jobs:
           )"
 
           if [ -z "$NDK_DIR" ]; then
-
             echo "ERROR: Android NDK not found."
-
             exit 1
-
           fi
 
-          echo
-          echo "Selected NDK:"
+          echo "Using NDK:"
           echo "$NDK_DIR"
 
           echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
 
+      # =====================================================
+      # 9. QuickJS-NG
+      # =====================================================
 
-      # ========================================================
-      # 9. بناء QuickJS-NG
-      #
-      # QuickJS-NG 0.15.1
-      #
-      # نبنيه لكل ABI:
-      #
-      # arm64-v8a
-      # armeabi-v7a
-      # x86_64
-      # ========================================================
-
-      - name: Build QuickJS-NG for Android
+      - name: Build QuickJS-NG
         shell: bash
         run: |
-
           set -e
 
           rm -rf /tmp/quickjs-ng
 
           git clone \
             --depth 1 \
-            --branch "${QUICKJS_VERSION}" \
+            --branch "${QUICKJS_TAG}" \
             https://github.com/quickjs-ng/quickjs.git \
             /tmp/quickjs-ng
 
-          echo
-          echo "QuickJS source:"
-          git -C /tmp/quickjs-ng log -1 --oneline
-
-          build_quickjs() {
+          build_qjs() {
 
             ABI="$1"
+            BUILD="/tmp/qjs-${ABI}"
 
             echo
             echo "======================================"
-            echo "QuickJS-NG: ${ABI}"
+            echo "QuickJS ${ABI}"
             echo "======================================"
 
-            BUILD_DIR="/tmp/qjs-build-${ABI}"
-
-            rm -rf "$BUILD_DIR"
+            rm -rf "$BUILD"
 
             cmake \
               -S /tmp/quickjs-ng \
-              -B "$BUILD_DIR" \
+              -B "$BUILD" \
               -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake" \
@@ -342,41 +306,25 @@ jobs:
               -DQJS_BUILD_LIBC=ON \
               -DQJS_BUILD_EXAMPLES=OFF \
               -DQJS_BUILD_TESTING=OFF \
-              -DQJS_BUILD_WERROR=OFF \
-              -DQJS_BUILD_CLI_WITH_MIMALLOC=OFF \
-              -DQJS_BUILD_CLI_WITH_STATIC_MIMALLOC=OFF
+              -DQJS_BUILD_WERROR=OFF
 
             cmake \
-              --build "$BUILD_DIR" \
+              --build "$BUILD" \
               --target qjs \
               --parallel 2
 
-            echo
-            echo "Build directory:"
-            find "$BUILD_DIR" \
-              -maxdepth 5 \
-              -type f \
-              -name qjs \
-              -print
-
-            QJS="$(find "$BUILD_DIR" \
-              -type f \
-              -name qjs \
-              -perm -111 \
-              | head -n 1)"
+            QJS="$(
+              find "$BUILD" \
+                -type f \
+                -name "qjs" \
+                -perm -111 \
+                | head -n 1
+            )"
 
             if [ -z "$QJS" ]; then
-
-              echo
-              echo "ERROR: QuickJS binary was not generated."
-
-              find "$BUILD_DIR" \
-                -maxdepth 5 \
-                -type f \
-                -print
-
+              echo "ERROR: QuickJS executable not found."
+              find "$BUILD" -type f -print
               exit 1
-
             fi
 
             cp \
@@ -386,7 +334,6 @@ jobs:
             chmod +x \
               "assets/bin/${ABI}/qjs"
 
-            echo
             echo "QuickJS installed:"
             ls -lh \
               "assets/bin/${ABI}/qjs"
@@ -395,34 +342,23 @@ jobs:
               "assets/bin/${ABI}/qjs"
           }
 
-          build_quickjs "arm64-v8a"
-          build_quickjs "armeabi-v7a"
-          build_quickjs "x86_64"
+          build_qjs arm64-v8a
+          build_qjs armeabi-v7a
+          build_qjs x86_64
 
+      # =====================================================
+      # 10. فحص كل الملفات
+      # =====================================================
 
-      # ========================================================
-      # 10. فحص FFmpeg + QuickJS
-      # ========================================================
-
-      - name: Verify bundled binaries
+      - name: Verify binaries
         shell: bash
         run: |
-
           set -e
 
-          echo
-          echo "======================================"
-          echo "VERIFY BINARIES"
-          echo "======================================"
-
-          for ABI in \
-            arm64-v8a \
-            armeabi-v7a \
-            x86_64
+          for ABI in arm64-v8a armeabi-v7a x86_64
           do
-
             echo
-            echo "ABI: $ABI"
+            echo "===== ${ABI} ====="
 
             test -x \
               "assets/bin/${ABI}/ffmpeg"
@@ -430,110 +366,77 @@ jobs:
             test -x \
               "assets/bin/${ABI}/qjs"
 
-            echo "FFmpeg:"
             ls -lh \
               "assets/bin/${ABI}/ffmpeg"
 
-            file \
-              "assets/bin/${ABI}/ffmpeg"
-
-            echo
-            echo "QuickJS:"
             ls -lh \
               "assets/bin/${ABI}/qjs"
-
-            file \
-              "assets/bin/${ABI}/qjs"
-
           done
 
           echo
-          echo "All binaries are ready."
+          echo "FFmpeg + QuickJS OK."
 
+      # =====================================================
+      # 11. فحص main.py
+      # =====================================================
 
-      # ========================================================
-      # 11. فحص Python
-      # ========================================================
-
-      - name: Validate Python source
+      - name: Validate Python
         shell: bash
         run: |
-
           set -e
 
           python -m py_compile main.py
 
-          echo
-          echo "main.py syntax OK."
+          echo "main.py OK."
 
-
-      # ========================================================
+      # =====================================================
       # 12. تثبيت dependencies المشروع
-      # ========================================================
+      # =====================================================
 
       - name: Install project dependencies
         shell: bash
         run: |
-
           set -e
 
           if [ -f requirements.txt ]; then
-
-            python -m pip install \
-              -r requirements.txt
-
+            python -m pip install -r requirements.txt
           fi
 
-          echo
-          echo "Project dependencies installed."
+      # =====================================================
+      # 13. تنظيف
+      # =====================================================
 
-
-      # ========================================================
-      # 13. تنظيف build القديم
-      # ========================================================
-
-      - name: Clean previous build
+      - name: Clean build
         shell: bash
         run: |
-
           rm -rf build
           rm -rf release
 
           mkdir -p release
 
-
-      # ========================================================
-      # 14. بناء APK Universal
-      # ========================================================
+      # =====================================================
+      # 14. Universal APK
+      # =====================================================
 
       - name: Build Universal APK
         shell: bash
         run: |
-
           set -e
-
-          echo
-          echo "======================================"
-          echo "BUILDING COPA X UNIVERSAL APK"
-          echo "======================================"
 
           flet build apk \
             --yes \
             --verbose
 
-
-      # ========================================================
-      # 15. البحث عن APK
-      # ========================================================
+      # =====================================================
+      # 15. العثور على APK
+      # =====================================================
 
       - name: Find APK
         shell: bash
         run: |
-
           set -e
 
-          echo
-          echo "Generated APK files:"
+          echo "Searching for APK..."
 
           find build \
             -type f \
@@ -548,69 +451,42 @@ jobs:
           )"
 
           if [ -z "$APK" ]; then
-
-            echo
-            echo "ERROR: No APK generated."
-
-            echo
-            echo "Build tree:"
+            echo "ERROR: APK was not generated."
 
             find build \
-              -maxdepth 7 \
               -type f \
-              -print \
-              | sort
+              -print
 
             exit 1
-
           fi
-
-          echo
-          echo "APK:"
-          echo "$APK"
 
           cp \
             "$APK" \
-            "release/COPA-X-Universal.apk"
+            release/COPA-X-Universal.apk
 
-
-      # ========================================================
+      # =====================================================
       # 16. معلومات APK
-      # ========================================================
+      # =====================================================
 
       - name: APK information
         shell: bash
         run: |
-
           set -e
-
-          echo
-          echo "======================================"
-          echo "FINAL APK"
-          echo "======================================"
 
           ls -lh \
             release/COPA-X-Universal.apk
 
-          echo
-          echo "SHA256:"
-
           sha256sum \
             release/COPA-X-Universal.apk
 
-
-      # ========================================================
+      # =====================================================
       # 17. رفع APK
-      # ========================================================
+      # =====================================================
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
-
         with:
           name: COPA-X-Universal-APK
-
           path: release/COPA-X-Universal.apk
-
           if-no-files-found: error
-
           retention-days: 30
