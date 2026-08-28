@@ -1,4 +1,4 @@
-name: Build COPA X Universal APK
+name: Build Universal APK
 
 on:
   workflow_dispatch:
@@ -9,74 +9,47 @@ on:
 permissions:
   contents: read
 
-env:
-  PYTHON_VERSION: "3.12"
-  FLET_CLI_NO_RICH_OUTPUT: "1"
-  PYTHONUTF8: "1"
-
 jobs:
   build:
     name: Build Universal APK
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          flutter-version: "3.44.8"
+          channel: stable
+          cache: true
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Setup Android
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK
+      - name: Check Flutter
         run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
+          flutter --version
+          dart --version
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-
-          python -m pip install \
-            "flet>=0.86.0,<1.0.0" \
-            "yt-dlp[default]" \
-            "yt-dlp-ejs"
-
-      - name: Verify yt-dlp
-        run: |
-          python -m yt_dlp --version
-          python -c "import yt_dlp; print('yt-dlp OK')"
-
-      - name: Verify EJS
-        run: |
-          python -c "import yt_dlp_ejs; print('yt-dlp-ejs OK')"
+      - name: Install dependencies
+        run: flutter pub get
 
       - name: Build Universal APK
-        run: |
-          flet build apk \
-            --clear-cache \
-            --project "COPA X" \
-            --product "COPA X" \
-            --description "COPA X Video Downloader"
+        run: flutter build apk --release
 
       - name: Find APK
         run: |
           echo "APK files:"
-          find build -type f -name "*.apk" -print
+          find build/app/outputs/flutter-apk -type f -name "*.apk" -print
+
+      - name: Rename APK
+        run: |
+          mkdir -p release
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             release/COPA-X-Universal.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: COPA-X-Universal-APK
-          path: build/**/*.apk
-          if-no-files-found: error
+          path: release/COPA-X-Universal.apk
+          retention-days: 30
