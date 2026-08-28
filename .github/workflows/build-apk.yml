@@ -1,26 +1,24 @@
-name: Build Universal APK
+name: Build COPA X Universal APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 env:
-  UV_PYTHON: "3.12"
-  PYTHONUTF8: "1"
-  FLET_CLI_NO_RICH_OUTPUT: "1"
+  FFMPEG_VERSION: "8.1.2"
+  QUICKJS_VERSION: "0.15.1"
 
 jobs:
   build:
     name: Build Universal APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout project
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -28,49 +26,109 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Flet
+      - name: Setup Android SDK and NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and CMake
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;26.3.11579264" "cmake;3.22.1"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "CMAKE_BIN=$ANDROID_SDK_ROOT/cmake/3.22.1/bin/cmake" >> "$GITHUB_ENV"
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "flet[all]"
+          python -m pip install -r requirements.txt
+          python -m yt_dlp --version
 
-      - name: Check project
+      - name: Prepare native asset folders
+        shell: bash
         run: |
-          python --version
-          flet --version
-          echo "Project files:"
-          ls -la
+          set -e
+          mkdir -p assets/bin/arm64-v8a
+          mkdir -p assets/bin/armeabi-v7a
+          mkdir -p assets/bin/x86_64
+          mkdir -p assets/bin/x86
 
-      - name: Install dependencies
+      - name: Download FFmpeg Android binaries
+        shell: bash
         run: |
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          fi
+          set -e
+          BASE="https://github.com/Tyrrrz/FFmpegBin/releases/download/${FFMPEG_VERSION}"
+          declare -A URLS
+          URLS[arm64-v8a]="ffmpeg-android-arm64.zip"
+          URLS[armeabi-v7a]="ffmpeg-android-arm.zip"
+          URLS[x86_64]="ffmpeg-android-x64.zip"
+          URLS[x86]="ffmpeg-android-x86.zip"
+
+          for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+            mkdir -p "/tmp/ffmpeg/$ABI"
+            curl -fL --retry 5 --retry-all-errors \
+              "$BASE/${URLS[$ABI]}" \
+              -o "/tmp/ffmpeg/$ABI/ffmpeg.zip"
+            unzip -q "/tmp/ffmpeg/$ABI/ffmpeg.zip" -d "/tmp/ffmpeg/$ABI/unpack"
+            BIN="$(find "/tmp/ffmpeg/$ABI/unpack" -type f -name ffmpeg | head -n 1)"
+            test -n "$BIN"
+            cp "$BIN" "assets/bin/$ABI/ffmpeg"
+            chmod +x "assets/bin/$ABI/ffmpeg"
+          done
+
+      - name: Build QuickJS-NG for Android
+        shell: bash
+        run: |
+          set -e
+          git clone --depth 1 --branch "v${QUICKJS_VERSION}" \
+            https://github.com/quickjs-ng/quickjs.git /tmp/quickjs
+
+          for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+            rm -rf /tmp/qjs-build
+            "$CMAKE_BIN" \
+              -S /tmp/quickjs \
+              -B /tmp/qjs-build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$ABI" \
+              -DANDROID_PLATFORM=android-24 \
+              -DQJS_BUILD_LIBC=ON \
+              -DQJS_BUILD_WERROR=OFF
+            "$CMAKE_BIN" --build /tmp/qjs-build --target qjs --parallel 2
+            BIN="$(find /tmp/qjs-build -type f -name qjs -perm -111 | head -n 1)"
+            test -n "$BIN"
+            cp "$BIN" "assets/bin/$ABI/qjs"
+            chmod +x "assets/bin/$ABI/qjs"
+          done
+
+      - name: Verify native binaries
+        shell: bash
+        run: |
+          set -e
+          for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+            test -x "assets/bin/$ABI/ffmpeg"
+            test -x "assets/bin/$ABI/qjs"
+            echo "=== $ABI ==="
+            ls -lh "assets/bin/$ABI/"
+          done
 
       - name: Build Universal APK
         run: |
           flet build apk --yes --verbose
 
-      - name: Find APK
+      - name: Collect APK
+        shell: bash
         run: |
-          echo "Searching for APK..."
-          find build -type f -name "*.apk" -print
-
-      - name: Prepare APK
-        run: |
+          set -e
           mkdir -p release
-          APK=$(find build -type f -name "*.apk" | head -n 1)
-
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated."
-            exit 1
-          fi
-
+          APK="$(find build -type f -name '*.apk' | head -n 1)"
+          test -n "$APK"
           cp "$APK" release/COPA-X-Universal.apk
+          ls -lh release/COPA-X-Universal.apk
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: COPA-X-Universal-APK
+          name: COPA-X-Universal
           path: release/COPA-X-Universal.apk
           if-no-files-found: error
           retention-days: 30
